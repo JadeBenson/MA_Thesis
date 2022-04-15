@@ -1,0 +1,224 @@
+---
+title: "Thesis_Analysis"
+author: "Jade Benson"
+date: "4/11/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(lme4)
+#install.packages('broom.mixed')
+require(broom.mixed)
+#install.packages("MLmetrics")
+library(MLmetrics)
+
+
+#rolling origin 
+#https://www.openforecast.org/adam/rollingOrigin.html
+
+
+```
+In this notebook, I run Poisson regressions using the weather, sociodemographics, and monthly fall rates from US counties from 2009 - 2015. I am basing this on this analysis: 
+https://github.com/lin-lab/COVID-Health-Disparities/blob/main/Scripts/Case%20Rate%20Total%20Models.R
+In this they add state as a variable which is just the state name. 
+They also add CountyI which is just a unique row indicator for each county: 1001 is 1, 1002 is 2, and 1005 is 3 (since it's the next one) but the first Alaska one is 68. 
+
+```{r load-data}
+full_regions_df <- read_csv("/Users/jadebenson/Documents/Thesis/full_data_regions.csv")
+
+head(full_regions_df)
+
+#add in column with unique number for each county
+
+fipscounty <- full_regions_df['fipscounty']
+unique_counties <- fipscounty %>%
+  distinct(fipscounty)
+
+unique_counties$County_ID <- seq.int(nrow(unique_counties))
+
+#merge this back in 
+
+data <- merge(full_regions_df, unique_counties, by.x = 'fipscounty', by.y = 'fipscounty')
+
+head(data)
+#worked!
+
+
+length(data$month_count)
+
+#maybe can just cast the fall rates as integers? 
+full_data$int_fall_rate = as.integer(full_data$scaled_fall_rate)
+
+#remove missingness so same size as other one
+full_data <- na.omit(data) 
+
+#idk why this is slightly longer 
+#need to re-do data process
+length(full_data$month_count)
+
+#split into training and testing sets 
+typeof(full_data$date)
+
+full_data <- full_data %>%
+  mutate(year = substr(date, 1, 4) )
+
+full_data <- full_data %>%
+  mutate(test_set = ifelse((year == '2014') | (year == '2015'), 1, 0))
+  
+train_data <-  full_data[ which(full_data$test_set==0), ]
+length(train_data$month_count)
+
+test_data <- full_data[ which(full_data$test_set==1), ]
+length(test_data$month_count)
+
+head(train_data)
+
+```
+
+
+
+```{r weather-fall-rates}
+
+weather_rate_model <- glmer(formula = int_fall_rate ~ offset(log(pop_65_up)) + state + 
+                scale(tavg_mean) + scale(tmin_min) + scale(tmax_max) +  
+                scale(tmax_max) + scale(prcp_max) + 
+                scale(snow_max) + scale(wspd_max) +
+                (1 | County_ID),
+              family=poisson(),
+              nAGQ=0,
+              data = train_data)
+
+
+summary(weather_rate_model)
+confint = tidy(weather_rate_model,conf.int=TRUE,exponentiate=TRUE,effects="fixed")
+multivariable = confint[-(1:49),c(2, 3, 6, 7, 8)] %>% print(n = Inf)
+
+weather_train_predictions=predict(weather_rate_model,train_data[-27])
+weather_train_MAPE = MAPE(train_data[,27],weather_train_predictions)
+
+print(paste0("Train MAPE: ", weather_train_MAPE))
+
+weather_test_predictions=predict(weather_rate_model,test_data[-27], allow.new.levels = TRUE)
+weather_test_MAPE = MAPE(test_data[,27],weather_test_predictions)
+print(paste0("Testing MAPE: ", weather_test_MAPE))
+
+```
+```{r demo-fall-rates}
+
+colnames(train_data)
+
+demo_rate_model <- glmer(formula = int_fall_rate ~ offset(log(pop_65_up)) + state + 
+                scale(pop_density) + scale(prop_female) + scale(prop_white_nh) +  
+                scale(prop_65_85_up) +
+                (1 | County_ID),
+              family=poisson(),
+              nAGQ=0,
+              data = train_data)
+
+
+summary(demo_rate_model)
+confint = tidy(demo_rate_model,conf.int=TRUE,exponentiate=TRUE,effects="fixed")
+multivariable = confint[-(1:49),c(2, 3, 6, 7, 8)] %>% print(n = Inf)
+
+demo_train_predictions=predict(demo_rate_model,train_data[-27])
+demo_train_MAPE = MAPE(train_data[,27], demo_train_predictions)
+
+print(paste0("Train MAPE: ", demo_train_MAPE))
+
+demo_test_predictions=predict(demo_rate_model,test_data[-27], allow.new.levels = TRUE)
+demo_test_MAPE = MAPE(test_data[,27],demo_test_predictions)
+print(paste0("Testing MAPE: ", demo_test_MAPE))
+
+```
+
+
+
+```{r econ-fall-rates}
+
+colnames(train_data)
+
+econ_rate_model <- glmer(formula = int_fall_rate ~ offset(log(pop_65_up)) + state + 
+                scale(median_income) + scale(gini_index) + scale(prop_poor) +
+                (1 | County_ID),
+              family=poisson(),
+              nAGQ=0,
+              data = train_data)
+
+
+summary(econ_rate_model)
+ confint = tidy(econ_rate_model,conf.int=TRUE,exponentiate=TRUE,effects="fixed")
+multivariable = confint[-(1:49),c(2, 3, 6, 7, 8)] %>% print(n = Inf)
+
+econ_train_predictions=predict(econ_rate_model,train_data[-27])
+econ_train_MAPE = MAPE(train_data[,27], econ_train_predictions)
+
+print(paste0("Train MAPE: ", econ_train_MAPE))
+
+econ_test_predictions=predict(econ_rate_model,test_data[-27], allow.new.levels = TRUE)
+econ_test_MAPE = MAPE(test_data[,27],econ_test_predictions)
+print(paste0("Testing MAPE: ", econ_test_MAPE))
+
+```
+
+```{r full-fall-rates}
+
+colnames(train_data)
+
+full_rate_model <- glmer(formula = int_fall_rate ~ offset(log(pop_65_up)) + state + 
+                scale(tavg_mean) + scale(tmin_min) + scale(tmax_max) +  
+                scale(tmax_max) + scale(prcp_max) + 
+                scale(snow_max) + scale(wspd_max) +
+                scale(pop_density) + scale(prop_female) + scale(prop_white_nh) +  
+                scale(prop_65_85_up) +
+                scale(median_income) + scale(gini_index) + scale(prop_poor) +
+                (1 | County_ID),
+              family=poisson(),
+              nAGQ=0,
+              data = train_data)
+
+
+summary(full_rate_model)
+ confint = tidy(full_rate_model,conf.int=TRUE,exponentiate=TRUE,effects="fixed")
+multivariable = confint[-(1:49),c(2, 3, 6, 7, 8)] %>% print(n = Inf)
+
+full_train_predictions=predict(full_rate_model,train_data[-27])
+full_train_MAPE = MAPE(train_data[,27], full_train_predictions)
+
+print(paste0("Train MAPE: ", full_train_MAPE))
+
+full_test_predictions=predict(full_rate_model,test_data[-27], allow.new.levels = TRUE)
+full_test_MAPE = MAPE(test_data[,27],full_test_predictions)
+print(paste0("Testing MAPE: ", full_test_MAPE))
+
+```
+
+
+
+
+
+```{r weather_poisson}
+
+#scaled rates as outcome? This gives so many errors - use raw counts instead?
+#yikes, slightly bigger, need to go back and have a consistent workflow 
+#proof of concept right now
+full_data$int_month_count = as.integer(full_data$month_count)
+
+typeof(full_data$int_month_count)
+
+weather_model <- glmer(formula = int_month_count ~ offset(log(pop_65_up)) + state + 
+                scale(tavg_mean) + scale(tmin_min) + scale(tmax_max) +  
+                scale(tmax_max) + scale(prcp_max) + 
+                scale(snow_max) + scale(wspd_max) +
+                (1 | County_ID),
+              family=poisson(),
+              nAGQ=0,
+              data = full_data)
+
+
+summary(weather_model)
+confint = tidy(weather_model,conf.int=TRUE,exponentiate=TRUE,effects="fixed")
+multivariable = confint[-(1:51),c(2, 3, 6, 7, 8)] %>% print(n = Inf)
+```
