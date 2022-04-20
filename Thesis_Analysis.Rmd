@@ -10,15 +10,14 @@ knitr::opts_chunk$set(echo = TRUE)
 
 library(tidyverse)
 library(lme4)
-#install.packages('broom.mixed')
 require(broom.mixed)
-#install.packages("MLmetrics")
 library(MLmetrics)
-
 
 #rolling origin 
 #https://www.openforecast.org/adam/rollingOrigin.html
-
+#https://rdrr.io/cran/greybox/man/ro.html
+#library(greybox)
+#this only works with explicitly forecasting models 
 
 ```
 In this notebook, I run Poisson regressions using the weather, sociodemographics, and monthly fall rates from US counties from 2009 - 2015. I am basing this on this analysis: 
@@ -27,198 +26,288 @@ In this they add state as a variable which is just the state name.
 They also add CountyI which is just a unique row indicator for each county: 1001 is 1, 1002 is 2, and 1005 is 3 (since it's the next one) but the first Alaska one is 68. 
 
 ```{r load-data}
-full_regions_df <- read_csv("/Users/jadebenson/Documents/Thesis/full_data_regions.csv")
+no_missing_regions_df <- read_csv("/Users/jadebenson/Documents/Thesis/no_missing_data.csv")
 
-head(full_regions_df)
+head(no_missing_regions_df)
 
 #add in column with unique number for each county
+fipscounty <- no_missing_regions_df['fipscounty']
 
-fipscounty <- full_regions_df['fipscounty']
 unique_counties <- fipscounty %>%
   distinct(fipscounty)
 
 unique_counties$County_ID <- seq.int(nrow(unique_counties))
 
 #merge this back in 
-
-data <- merge(full_regions_df, unique_counties, by.x = 'fipscounty', by.y = 'fipscounty')
+data <- merge(no_missing_regions_df, unique_counties, by.x = 'fipscounty', by.y = 'fipscounty')
 
 head(data)
 #worked!
 
-
-length(data$month_count)
+length(data$scaled_fall_rate)
 
 #maybe can just cast the fall rates as integers? 
-full_data$int_fall_rate = as.integer(full_data$scaled_fall_rate)
-
-#remove missingness so same size as other one
-full_data <- na.omit(data) 
-
-#idk why this is slightly longer 
-#need to re-do data process
-length(full_data$month_count)
+data$int_fall_rate = as.integer(data$scaled_fall_rate)
 
 #split into training and testing sets 
-typeof(full_data$date)
+typeof(data$date)
 
-full_data <- full_data %>%
+data <- data %>%
   mutate(year = substr(date, 1, 4) )
 
-full_data <- full_data %>%
+data <- data %>%
   mutate(test_set = ifelse((year == '2014') | (year == '2015'), 1, 0))
   
-train_data <-  full_data[ which(full_data$test_set==0), ]
+train_data <-  data[ which(data$test_set==0), ]
 length(train_data$month_count)
 
-test_data <- full_data[ which(full_data$test_set==1), ]
+test_data <- data[ which(data$test_set==1), ]
 length(test_data$month_count)
 
-head(train_data)
+geographic_vars <- c('pop_65_up', 'STATE', 'County_ID')
+weather_vars <- c('tavg_mean', 'tmin_min', 'tmax_max', 'prcp_max', 'snow_max', 'wspd_max')
+demo_vars <- c('prop_65_85_up', 'prop_female', 'prop_white_nh', 'pop_density')
+econ_vars <- c('median_income', 'gini_index', 'prop_poor')
+full_vars <- c(weather_vars, demo_vars, econ_vars)
+
+```
+
+
+Functions 
+
+```{r weather-fall-rates-func}
+
+weather_function <- function(train_df, test_df, weather_vector){
+  
+  weather_train <- train_df %>% 
+    select(c('int_fall_rate', geographic_vars,  weather_vector)) %>% 
+    mutate_at(weather_vector, funs(c(scale(.))))
+  
+  weather_test <- test_df %>% 
+    select(c('int_fall_rate', geographic_vars,  weather_vector)) %>% 
+    mutate_at(weather_vector, funs(c(scale(.))))
+  
+  #Model Fit
+  weather_rate_model <- glmer(formula = int_fall_rate ~ offset(log(pop_65_up)) + STATE +  (1 | County_ID) +
+                  tavg_mean + tmin_min + tmax_max +  
+                  prcp_max + snow_max + wspd_max, 
+                family=poisson(),
+                nAGQ=0,
+                data = weather_train)
+  
+  
+  summary(weather_rate_model)
+  confint = tidy(weather_rate_model,conf.int=TRUE,exponentiate=TRUE,effects="fixed")
+  multivariable = confint[, c(2, 3, 6, 7, 8)] %>% print(n = Inf)
+  
+  #train evaluation
+  weather_train_predictions= predict(weather_rate_model, select(weather_train, -c('int_fall_rate')) )
+  weather_train_MAPE = MAPE(weather_train$int_fall_rate, weather_train_predictions)
+  print(paste0("Train MAPE: ", weather_train_MAPE))
+  
+  
+  #test evaluation
+   weather_test_predictions=predict(weather_rate_model, select(weather_test, -c('int_fall_rate')), allow.new.levels = TRUE)
+  weather_test_MAPE = MAPE(weather_test$int_fall_rate, weather_test_predictions)
+  print(paste0("Testing MAPE: ", weather_test_MAPE))
+}
+
 
 ```
 
 
 
-```{r weather-fall-rates}
+```{r demo-model-func}
 
-weather_rate_model <- glmer(formula = int_fall_rate ~ offset(log(pop_65_up)) + state + 
-                scale(tavg_mean) + scale(tmin_min) + scale(tmax_max) +  
-                scale(tmax_max) + scale(prcp_max) + 
-                scale(snow_max) + scale(wspd_max) +
-                (1 | County_ID),
-              family=poisson(),
-              nAGQ=0,
-              data = train_data)
-
-
-summary(weather_rate_model)
-confint = tidy(weather_rate_model,conf.int=TRUE,exponentiate=TRUE,effects="fixed")
-multivariable = confint[-(1:49),c(2, 3, 6, 7, 8)] %>% print(n = Inf)
-
-weather_train_predictions=predict(weather_rate_model,train_data[-27])
-weather_train_MAPE = MAPE(train_data[,27],weather_train_predictions)
-
-print(paste0("Train MAPE: ", weather_train_MAPE))
-
-weather_test_predictions=predict(weather_rate_model,test_data[-27], allow.new.levels = TRUE)
-weather_test_MAPE = MAPE(test_data[,27],weather_test_predictions)
-print(paste0("Testing MAPE: ", weather_test_MAPE))
-
-```
-```{r demo-fall-rates}
-
-colnames(train_data)
-
-demo_rate_model <- glmer(formula = int_fall_rate ~ offset(log(pop_65_up)) + state + 
-                scale(pop_density) + scale(prop_female) + scale(prop_white_nh) +  
-                scale(prop_65_85_up) +
-                (1 | County_ID),
-              family=poisson(),
-              nAGQ=0,
-              data = train_data)
-
-
-summary(demo_rate_model)
-confint = tidy(demo_rate_model,conf.int=TRUE,exponentiate=TRUE,effects="fixed")
-multivariable = confint[-(1:49),c(2, 3, 6, 7, 8)] %>% print(n = Inf)
-
-demo_train_predictions=predict(demo_rate_model,train_data[-27])
-demo_train_MAPE = MAPE(train_data[,27], demo_train_predictions)
-
-print(paste0("Train MAPE: ", demo_train_MAPE))
-
-demo_test_predictions=predict(demo_rate_model,test_data[-27], allow.new.levels = TRUE)
-demo_test_MAPE = MAPE(test_data[,27],demo_test_predictions)
-print(paste0("Testing MAPE: ", demo_test_MAPE))
+demo_function <- function(train_df, test_df, demo_vector){
+  
+  demo_train <- train_df %>% 
+    select(c('int_fall_rate', geographic_vars,  demo_vector)) %>% 
+    mutate_at(demo_vector, funs(c(scale(.))))
+  
+  demo_test <- test_df %>% 
+    select(c('int_fall_rate', geographic_vars,  demo_vector)) %>% 
+    mutate_at(demo_vector, funs(c(scale(.))))
+  
+  #Model Fit
+  demo_rate_model <- glmer(formula = int_fall_rate ~ offset(log(pop_65_up)) + STATE +  (1 | County_ID) +
+                  prop_65_85_up + prop_female + prop_white_nh + pop_density, 
+                family=poisson(),
+                nAGQ=0,
+                data = demo_train)
+  
+  
+  summary(demo_rate_model)
+  confint = tidy(demo_rate_model,conf.int=TRUE,exponentiate=TRUE,effects="fixed")
+  multivariable = confint[ , c(2, 3, 6, 7, 8)] %>% print(n = Inf)
+  
+  #train evaluation
+  demo_train_predictions= predict(demo_rate_model, select(demo_train, -c('int_fall_rate')) )
+  demo_train_MAPE = MAPE(demo_train$int_fall_rate, demo_train_predictions)
+  print(paste0("Train MAPE: ", demo_train_MAPE))
+  
+  
+  #test evaluation
+   demo_test_predictions=predict(demo_rate_model, select(demo_test, -c('int_fall_rate')), allow.new.levels = TRUE)
+  demo_test_MAPE = MAPE(demo_test$int_fall_rate, demo_test_predictions)
+  print(paste0("Testing MAPE: ", demo_test_MAPE))
+}
 
 ```
-
 
 
 ```{r econ-fall-rates}
 
-colnames(train_data)
-
-econ_rate_model <- glmer(formula = int_fall_rate ~ offset(log(pop_65_up)) + state + 
-                scale(median_income) + scale(gini_index) + scale(prop_poor) +
-                (1 | County_ID),
-              family=poisson(),
-              nAGQ=0,
-              data = train_data)
-
-
-summary(econ_rate_model)
- confint = tidy(econ_rate_model,conf.int=TRUE,exponentiate=TRUE,effects="fixed")
-multivariable = confint[-(1:49),c(2, 3, 6, 7, 8)] %>% print(n = Inf)
-
-econ_train_predictions=predict(econ_rate_model,train_data[-27])
-econ_train_MAPE = MAPE(train_data[,27], econ_train_predictions)
-
-print(paste0("Train MAPE: ", econ_train_MAPE))
-
-econ_test_predictions=predict(econ_rate_model,test_data[-27], allow.new.levels = TRUE)
-econ_test_MAPE = MAPE(test_data[,27],econ_test_predictions)
-print(paste0("Testing MAPE: ", econ_test_MAPE))
-
-```
-
-```{r full-fall-rates}
-
-colnames(train_data)
-
-full_rate_model <- glmer(formula = int_fall_rate ~ offset(log(pop_65_up)) + state + 
-                scale(tavg_mean) + scale(tmin_min) + scale(tmax_max) +  
-                scale(tmax_max) + scale(prcp_max) + 
-                scale(snow_max) + scale(wspd_max) +
-                scale(pop_density) + scale(prop_female) + scale(prop_white_nh) +  
-                scale(prop_65_85_up) +
-                scale(median_income) + scale(gini_index) + scale(prop_poor) +
-                (1 | County_ID),
-              family=poisson(),
-              nAGQ=0,
-              data = train_data)
-
-
-summary(full_rate_model)
- confint = tidy(full_rate_model,conf.int=TRUE,exponentiate=TRUE,effects="fixed")
-multivariable = confint[-(1:49),c(2, 3, 6, 7, 8)] %>% print(n = Inf)
-
-full_train_predictions=predict(full_rate_model,train_data[-27])
-full_train_MAPE = MAPE(train_data[,27], full_train_predictions)
-
-print(paste0("Train MAPE: ", full_train_MAPE))
-
-full_test_predictions=predict(full_rate_model,test_data[-27], allow.new.levels = TRUE)
-full_test_MAPE = MAPE(test_data[,27],full_test_predictions)
-print(paste0("Testing MAPE: ", full_test_MAPE))
+econ_function <- function(train_df, test_df, econ_vector){
+  
+  econ_train <- train_df %>% 
+    select(c('int_fall_rate', geographic_vars,  econ_vector)) %>% 
+    mutate_at(econ_vector, funs(c(scale(.))))
+  
+  econ_test <- test_df %>% 
+    select(c('int_fall_rate', geographic_vars,  econ_vector)) %>% 
+    mutate_at(econ_vector, funs(c(scale(.))))
+  
+  #Model Fit
+  econ_rate_model <- glmer(formula = int_fall_rate ~ offset(log(pop_65_up)) + STATE +  (1 | County_ID) +
+                  median_income + gini_index + prop_poor , 
+                family=poisson(),
+                nAGQ=0,
+                data = econ_train)
+  
+  
+  summary(econ_rate_model)
+  confint = tidy(econ_rate_model,conf.int=TRUE,exponentiate=TRUE,effects="fixed")
+  sum_len = length(summary(econ_rate_model))
+  var_len = length(econ_vars)
+  multivariable = confint[ ,c(2, 3, 6, 7, 8)] %>% print(n = Inf)
+  
+  
+  #train evaluation
+  econ_train_predictions= predict(econ_rate_model, select(econ_train, -c('int_fall_rate')) )
+  econ_train_MAPE = MAPE(econ_train$int_fall_rate, econ_train_predictions)
+  print(paste0("Train MAPE: ", econ_train_MAPE))
+  
+  
+  #test evaluation
+   econ_test_predictions=predict(econ_rate_model, select(econ_test, -c('int_fall_rate')), allow.new.levels = TRUE)
+  econ_test_MAPE = MAPE(econ_test$int_fall_rate, econ_test_predictions)
+  print(paste0("Testing MAPE: ", econ_test_MAPE))
+}
 
 ```
 
 
+```{r full-func}
+
+full_function <- function(train_df, test_df, full_vector){
+  
+  full_train <- train_df %>% 
+    select(c('int_fall_rate', geographic_vars,  full_vector)) %>% 
+    mutate_at(full_vector, funs(c(scale(.))))
+  
+  full_test <- test_df %>% 
+    select(c('int_fall_rate', geographic_vars,  full_vector)) %>% 
+    mutate_at(full_vector, funs(c(scale(.))))
+  
+  #Model Fit
+  full_rate_model <- glmer(formula = int_fall_rate ~ offset(log(pop_65_up)) + STATE +  (1 | County_ID) +
+                  tavg_mean + tmin_min + tmax_max + prcp_max + snow_max + wspd_max + 
+                  prop_65_85_up + prop_female + prop_white_nh + pop_density + 
+                  median_income + gini_index + prop_poor , 
+                family=poisson(),
+                nAGQ=0,
+                data = full_train)
+  
+  
+  summary(full_rate_model)
+  confint = tidy(full_rate_model,conf.int=TRUE,exponentiate=TRUE,effects="fixed")
+  multivariable = confint[ ,c(2, 3, 6, 7, 8)] %>% print(n = Inf)
+  
+  
+  #train evaluation
+  full_train_predictions= predict(full_rate_model, select(full_train, -c('int_fall_rate')) )
+  full_train_MAPE = MAPE(full_train$int_fall_rate, full_train_predictions)
+  print(paste0("Train MAPE: ", full_train_MAPE))
+  
+  
+  #test evaluation
+   full_test_predictions=predict(full_rate_model, select(full_test, -c('int_fall_rate')), allow.new.levels = TRUE)
+  full_test_MAPE = MAPE(full_test$int_fall_rate, full_test_predictions)
+  print(paste0("Testing MAPE: ", full_test_MAPE))
+}
+
+```
 
 
 
-```{r weather_poisson}
+National Models
+```{r national-models}
+weather_function(train_df = train_data, test_df = test_data, weather_vector = weather_vars)
+demo_function(train_df = train_data, test_df = test_data, demo_vector = demo_vars)
+econ_function(train_df = train_data, test_df = test_data, econ_vector = econ_vars)
+full_function(train_df = train_data, test_df = test_data, full_vector = full_vars)
 
-#scaled rates as outcome? This gives so many errors - use raw counts instead?
-#yikes, slightly bigger, need to go back and have a consistent workflow 
-#proof of concept right now
-full_data$int_month_count = as.integer(full_data$month_count)
-
-typeof(full_data$int_month_count)
-
-weather_model <- glmer(formula = int_month_count ~ offset(log(pop_65_up)) + state + 
-                scale(tavg_mean) + scale(tmin_min) + scale(tmax_max) +  
-                scale(tmax_max) + scale(prcp_max) + 
-                scale(snow_max) + scale(wspd_max) +
-                (1 | County_ID),
-              family=poisson(),
-              nAGQ=0,
-              data = full_data)
+```
 
 
-summary(weather_model)
-confint = tidy(weather_model,conf.int=TRUE,exponentiate=TRUE,effects="fixed")
-multivariable = confint[-(1:51),c(2, 3, 6, 7, 8)] %>% print(n = Inf)
+Regional Models 
+
+```{r regional-dfs}
+
+west_train <- train_data[which(train_data$region == 'west'), ]
+west_test <- test_data[which(test_data$region == 'west'), ]
+#good same length as in Python
+length(west_train$int_fall_rate) + length(west_test$int_fall_rate)
+
+
+midwest_train <- train_data[which(train_data$region == 'midwest'), ]
+midwest_test <- test_data[which(test_data$region == 'midwest'), ]
+#good 
+length(midwest_train$int_fall_rate) + length(midwest_test$int_fall_rate)
+
+
+south_train <- train_data[which(train_data$region == 'south'), ]
+south_test <- test_data[which(test_data$region == 'south'), ]
+#good 
+length(south_train$int_fall_rate) + length(south_test$int_fall_rate)
+
+
+northeast_train <- train_data[which(train_data$region == 'northeast'), ]
+northeast_test <- test_data[which(test_data$region == 'northeast'), ]
+#good 
+length(northeast_train$int_fall_rate) + length(northeast_test$int_fall_rate)
+
+```
+
+```{r regional-models}
+
+#weather
+weather_function(train_df = west_train, test_df = west_test, weather_vector = weather_vars)
+weather_function(train_df = midwest_train, test_df = midwest_test, weather_vector = weather_vars)
+weather_function(train_df = south_train, test_df = south_test, weather_vector = weather_vars)
+weather_function(train_df = northeast_train, test_df = northeast_test, weather_vector = weather_vars)
+
+
+#demographics
+demo_function(train_df = west_train, test_df = west_test, demo_vector = demo_vars)
+demo_function(train_df = midwest_train, test_df = midwest_test, demo_vector = demo_vars)
+demo_function(train_df = south_train, test_df = south_test, demo_vector = demo_vars)
+demo_function(train_df = northeast_train, test_df = northeast_test, demo_vector = demo_vars)
+
+
+#socioeconomics
+econ_function(train_df = west_train, test_df = west_test, econ_vector = econ_vars)
+econ_function(train_df = midwest_train, test_df = midwest_test, econ_vector = econ_vars)
+econ_function(train_df = south_train, test_df = south_test, econ_vector = econ_vars)
+econ_function(train_df = northeast_train, test_df = northeast_test, econ_vector = econ_vars)
+
+
+#full
+full_function(train_df = west_train, test_df = west_test, full_vector = full_vars)
+full_function(train_df = midwest_train, test_df = midwest_test, full_vector = full_vars)
+full_function(train_df = south_train, test_df = south_test, full_vector = full_vars)
+full_function(train_df = northeast_train, test_df = northeast_test, full_vector = full_vars)
+
+
 ```
